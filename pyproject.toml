@@ -1,0 +1,19 @@
+[project]
+name = "cfpb-complaints-analysis"
+version = "0.1.0"
+description = "CFPB Consumer Complaint Database as clean Parquet plus an MCP server: 18M complaints and 3.85M archived narratives"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = ["duckdb>=1.0", "mcp>=1.2,<2"]
+
+[project.scripts]
+cfpb-complaints = "cfpb_complaints.cli:main"
+cfpb-complaints-mcp = "cfpb_complaints.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
