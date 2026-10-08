@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir .
 COPY deploy-data /data
 ENV CFPB_DATA_DIR=/data
 RUN python -m cfpb_complaints.mcp_server --check
-ENV CFPB_ALLOWED_HOSTS=cfpb-complaints-analysis.fly.dev CFPB_MEMORY_LIMIT=350MB CFPB_THREADS=1 CFPB_QUERY_TIMEOUT=50 CFPB_RATE_PER_MIN=40
+ENV CFPB_ALLOWED_HOSTS=cfpb-complaints-analysis.fly.dev CFPB_MEMORY_LIMIT=700MB CFPB_THREADS=2 CFPB_QUERY_TIMEOUT=50 CFPB_RATE_PER_MIN=40
 USER nobody
 EXPOSE 8080
 CMD ["python", "-m", "cfpb_complaints.mcp_server", "--http"]
