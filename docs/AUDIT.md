@@ -41,6 +41,9 @@ Archive: https://www.consumerfinance.gov/foia-requests/foia-electronic-reading-r
 - 15 archived narratives belong to IDs no longer in the live file. They are kept and returned by `get_complaint` with a note.
 - For the 17.5M IDs present in both, structured fields in the archive were not compared field by field beyond the join; the server serves structured fields only from the live file.
 
+- The archive thins out at the end. Narratives per month in the archive's own files: May 2026 17,525, June 2026 16,817, July 2026 10,002 (10,000 joined to live complaints), August 2026 1. We checked the July and August archive files directly: the source has 10,002 and 1 narratives, so this is a source limit, not a build truncation. Do not read it as a drop in complaints with narratives.
+- `dataset_info` reports 3,851,415 narratives and 3,851,400 linked to a live complaint; the difference is the 15 above.
+
 Narrative counts have no CFPB-published aggregate to reconcile with (CFPB removed the narrative filters and counts from its site). The count of 3,851,415 is our own count of the archive.
 
 ## 5. Known data quality limits
