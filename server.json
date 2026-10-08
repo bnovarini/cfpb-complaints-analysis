@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.bnovarini/cfpb-complaints-analysis",
+  "title": "CFPB consumer complaints",
+  "description": "CFPB Consumer Complaint Database: 18M complaints and 3.85M archived narratives. Search, counts, trends, company comparison.",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/bnovarini/cfpb-complaints-analysis",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://cfpb-complaints-analysis.fly.dev/mcp"
+    }
+  ]
+}
