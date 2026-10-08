@@ -295,10 +295,42 @@ def _snippet(text: str, terms: list[str], width: int = 450) -> str:
     return ("..." if s else "") + seg + ("..." if s + width < len(text) else "")
 
 
+def _narr_where(words, phrase, any_of, company, company_contains, product, state, date_from, date_to):
+    """Conditions on the narratives table itself. It carries date, company, product and state, sorted by date,
+    so these filters skip most of the 3.9 GB of text before any keyword is matched."""
+    w: list[str] = []
+    p: list[Any] = []
+    if company:
+        w.append("n.company = ?"); p.append(company)
+    if company_contains:
+        w.append("n.company ILIKE ?"); p.append(f"%{company_contains}%")
+    if product:
+        w.append("n.product ILIKE ?"); p.append(product)
+    if state:
+        st = state.upper().strip()
+        if st not in STATES:
+            raise ValueError(f"state must be a two-letter code, got {state!r}")
+        w.append("n.state = ?"); p.append(st)
+    f, t = _d(date_from, "date_from"), _d(date_to, "date_to", end=True)
+    if f:
+        w.append("n.date_received >= CAST(? AS DATE)"); p.append(f)
+    if t:
+        w.append("n.date_received <= CAST(? AS DATE)"); p.append(t)
+    for x in words:
+        w.append("contains(lower(n.narrative), ?)"); p.append(x.lower())
+    if phrase:
+        w.append("contains(lower(n.narrative), ?)"); p.append(phrase.lower())
+    if any_of:
+        w.append("(" + " OR ".join("contains(lower(n.narrative), ?)" for _ in any_of) + ")"); p += [a.lower() for a in any_of]
+    return (" AND ".join(w) or "TRUE"), p
+
+
 @mcp.tool(description="Keyword search over archived complaint narratives (frozen at " + NARRATIVE_FREEZE + "; CFPB stopped publishing them in September 2026). "
                       "query: words that must all appear (case-insensitive), or use phrase for an exact phrase, or any_of for alternatives. "
-                      "Returns a snippet per complaint plus its structured fields; use get_complaint for the full text. A date, company or product filter makes it much faster. "
-                      + FILTER_DOC)
+                      "Returns a snippet per complaint plus its structured fields, newest first; use get_complaint for the full text. "
+                      "Searches scan text, so narrow with date_from/date_to, company/company_contains, product or state when you can: an unfiltered search over all years can time out. "
+                      "Filters: company, company_contains, product, state (2 letters), date_from/date_to (YYYY-MM-DD or YYYY-MM), "
+                      "plus issue, sub_product, company_response, timely, tag (these are slower).")
 def search_narratives(query: Optional[str] = None, phrase: Optional[str] = None, any_of: Optional[list[str]] = None,
                       company: Optional[str] = None, company_contains: Optional[str] = None, product: Optional[str] = None,
                       sub_product: Optional[str] = None, issue: Optional[str] = None, state: Optional[str] = None,
@@ -309,18 +341,20 @@ def search_narratives(query: Optional[str] = None, phrase: Optional[str] = None,
         raise ValueError("pass query, phrase or any_of")
     limit, offset = _page(limit, offset)
     limit = min(limit, 25)
-    where, p = _filters(company, company_contains, product, sub_product, issue, state, date_from, date_to, company_response, timely, None, tag)
-    conds, tp = [], []
-    for w in words:
-        conds.append("contains(lower(n.narrative), ?)"); tp.append(w.lower())
-    if phrase:
-        conds.append("contains(lower(n.narrative), ?)"); tp.append(phrase.lower())
-    if any_of:
-        conds.append("(" + " OR ".join("contains(lower(n.narrative), ?)" for _ in any_of) + ")"); tp += [a.lower() for a in any_of]
-    sql = (f"SELECT c.complaint_id, c.date_received, c.company, c.product, c.issue, c.state, c.company_response, n.narrative "
-           f"FROM c JOIN n USING (complaint_id) WHERE {where} AND {' AND '.join(conds)} ORDER BY c.date_received DESC, c.complaint_id DESC "
-           f"LIMIT {limit + 1} OFFSET {offset}")
-    rows = run(sql, p + tp)
+    nw, np_ = _narr_where(words, phrase, any_of, company, company_contains, product, state, date_from, date_to)
+    cw, cp = _filters(None, None, None, sub_product, issue, None, None, None, company_response, timely, None, tag)
+    if cw != "TRUE":
+        sql = (f"SELECT n.complaint_id, n.date_received, n.company, n.product, c.issue, n.state, c.company_response, n.narrative "
+               f"FROM n JOIN c USING (complaint_id) WHERE {nw} AND {cw} ORDER BY n.date_received DESC, n.complaint_id DESC LIMIT {limit + 1} OFFSET {offset}")
+        rows = run(sql, np_ + cp)
+    else:
+        rows = run(f"SELECT n.complaint_id, n.date_received, n.company, n.product, n.state, n.narrative FROM n WHERE {nw} "
+                   f"ORDER BY n.date_received DESC, n.complaint_id DESC LIMIT {limit + 1} OFFSET {offset}", np_)
+        more_fields = {r["complaint_id"]: r for r in run(
+            "SELECT complaint_id, issue, company_response FROM c WHERE complaint_id IN (" + ",".join(str(int(r["complaint_id"])) for r in rows[:limit]) + ")")} if rows else {}
+        for r in rows:
+            m = more_fields.get(r["complaint_id"], {})
+            r["issue"], r["company_response"] = m.get("issue"), m.get("company_response")
     terms = words + ([phrase] if phrase else []) + (any_of or [])
     more = len(rows) > limit
     out = []
@@ -335,35 +369,27 @@ def search_narratives(query: Optional[str] = None, phrase: Optional[str] = None,
     return out
 
 
-@mcp.tool(description="Count how many archived narratives match a keyword search, optionally grouped by year, product, company, issue or state. "
-                      "Same search arguments as search_narratives. Use this for 'how many complaints mention X'. Counts only complaints that have a narrative (through "
-                      + NARRATIVE_FREEZE + "), not all complaints. " + FILTER_DOC)
+@mcp.tool(description="Count how many archived narratives match a keyword search, optionally grouped by year, month, product, company, issue or state. "
+                      "Same search and filter arguments as search_narratives (without the slower issue/response filters). Use this for 'how many complaints mention X'. "
+                      "Counts only complaints that have a narrative (through " + NARRATIVE_FREEZE + "), not all complaints. Narrow with date, company or product when you can.")
 def count_narratives(query: Optional[str] = None, phrase: Optional[str] = None, any_of: Optional[list[str]] = None, group_by: Optional[str] = None,
                      company: Optional[str] = None, company_contains: Optional[str] = None, product: Optional[str] = None,
-                     issue: Optional[str] = None, state: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None,
-                     limit: int = 25) -> list[dict]:
-    if group_by and group_by not in ("year", "product", "company", "issue", "state", "month"):
-        raise ValueError("group_by must be year, month, product, company, issue or state")
+                     state: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, limit: int = 25) -> list[dict]:
+    cols = {"year": "year(n.date_received)", "month": "strftime(n.date_received, '%Y-%m')", "product": "n.product", "company": "n.company", "state": "n.state"}
+    if group_by and group_by not in cols:
+        raise ValueError("group_by must be year, month, product, company or state")
     words = [w for w in re.split(r"\s+", (query or "").strip()) if w]
-    where, p = _filters(company, company_contains, product, None, issue, state, date_from, date_to, None, None, None, None)
-    conds, tp = [], []
-    for w in words:
-        conds.append("contains(lower(n.narrative), ?)"); tp.append(w.lower())
-    if phrase:
-        conds.append("contains(lower(n.narrative), ?)"); tp.append(phrase.lower())
-    if any_of:
-        conds.append("(" + " OR ".join("contains(lower(n.narrative), ?)" for _ in any_of) + ")"); tp += [a.lower() for a in any_of]
-    cond = (" AND " + " AND ".join(conds)) if conds else ""
+    nw, np_ = _narr_where(words, phrase, any_of, company, company_contains, product, state, date_from, date_to)
     limit, _ = _page(limit, 0)
-    sel = f"{GROUPS[group_by]} AS {group_by}, " if group_by else ""
+    sel = f"{cols[group_by]} AS {group_by}, " if group_by else ""
     grp = " GROUP BY 1 ORDER BY " + ("1" if group_by in ("year", "month") else "2 DESC") if group_by else ""
-    return run(f"SELECT {sel}count(*) AS narratives FROM c JOIN n USING (complaint_id) WHERE {where}{cond}{grp} LIMIT {limit}", p + tp)
+    return run(f"SELECT {sel}count(*) AS narratives FROM n WHERE {nw}{grp} LIMIT {limit}", np_)
 
 
 @mcp.tool(description="One complaint by its CFPB Complaint ID: all structured fields and, when archived, the full narrative.")
 def get_complaint(complaint_id: int) -> dict:
     rows = run("SELECT * FROM c WHERE complaint_id = ?", [int(complaint_id)])
-    nr = run("SELECT narrative FROM n WHERE complaint_id = ?", [int(complaint_id)])
+    nr = run("SELECT narrative FROM n WHERE complaint_id = ? LIMIT 1", [int(complaint_id)])
     if not rows and not nr:
         return {"error": f"Complaint {complaint_id} is not in the dataset. It may be newer than the data, or CFPB may have removed it."}
     r = rows[0] if rows else {"complaint_id": int(complaint_id), "note": "Narrative is archived but the complaint is no longer in the live CFPB file."}
