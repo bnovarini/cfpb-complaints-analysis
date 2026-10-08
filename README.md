@@ -19,6 +19,7 @@ This project joins the archived narratives back to the live complaints by Compla
 
 - Narratives exist only for complaints CFPB had published with one through 2026-08-14. Complaints from after that have none, and it will stay that way.
 - Fewer than half of complaints ever had a narrative: the consumer had to consent, and none were published before 2015.
+- The archive thins out near the end: about 17,000 narratives each for May and June 2026, about 10,000 for July, and 1 for August. This is in CFPB's source files, so 2026 narrative counts are not comparable to earlier months.
 - Narratives are scrubbed by CFPB (personal data shows as XXXX).
 - Structured fields keep updating when you rebuild from CFPB's live file.
 
@@ -43,7 +44,7 @@ Build it yourself from CFPB's sources: `cfpb-complaints --data data build`.
 - Counts are raw. A large company will have more complaints than a small one; nothing is scaled by customers or accounts.
 - CFPB lists some firms under several names. Use `find_company` and `company_contains` to include all variants.
 - The newest months are partial: complaints are still being sent to companies, and "In progress" is a status, not an outcome.
-- Keyword narrative search scans text. Unfiltered searches take about ten seconds. A date, company or product filter makes them much faster.
+- Keyword narrative search scans text. Unfiltered searches take about ten seconds, and counts across all years can take 30 to 45 seconds. A date, company or product filter makes them much faster.
 
 ## Checks
 
