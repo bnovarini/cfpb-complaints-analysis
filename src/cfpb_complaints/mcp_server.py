@@ -20,8 +20,8 @@ from typing import Any, Optional
 import duckdb
 from mcp.server.fastmcp import FastMCP
 
-RELEASE = "data-2026-10-07"
-BASE_URL = f"https://github.com/bnovarini/cfpb-complaints-analysis/releases/download/{RELEASE}/"
+RELEASE = "2026-10-07"  # data snapshot; rebuild with `cfpb-complaints build` to refresh
+BASE_URL = os.environ.get("CFPB_DATA_URL", "https://cfpb-complaints-analysis.fly.dev/data/")
 FILES = ["complaints.parquet", *[f"narratives_{i:02d}.parquet" for i in range(1, 22)]]
 MAX_ROWS = 100
 QUERY_TIMEOUT_S = float(os.environ.get("CFPB_QUERY_TIMEOUT", "25"))
@@ -413,6 +413,15 @@ def http_app():
     mcp.settings.json_response = True
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=bool(hosts), allowed_hosts=hosts, allowed_origins=["*"] if hosts else [])
+
+    @mcp.custom_route("/data/{name}", methods=["GET"])
+    async def data_file(request):
+        from starlette.responses import FileResponse
+        name = request.path_params["name"]
+        p = data_dir() / name
+        if name not in FILES or not p.exists():
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return FileResponse(p, media_type="application/octet-stream", filename=name)
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request):
