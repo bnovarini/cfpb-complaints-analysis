@@ -124,11 +124,11 @@ def _filters(company=None, company_contains=None, product=None, sub_product=None
     if company:
         w.append(f"{prefix}company = ?"); p.append(company)
     if company_contains:
-        w.append(f"{prefix}company ILIKE ?"); p.append(f"%{company_contains}%")
+        w.append(f"{prefix}company ILIKE ? ESCAPE '\\'"); p.append(_like(company_contains))
     for col, v in (("product", product), ("sub_product", sub_product), ("issue", issue), ("company_response", company_response),
                    ("submitted_via", submitted_via)):
         if v:
-            w.append(f"{prefix}{col} ILIKE ?"); p.append(v)
+            w.append(f"lower({prefix}{col}) = lower(?)"); p.append(v)
     if state:
         s = state.upper().strip()
         if s not in STATES:
@@ -143,7 +143,7 @@ def _filters(company=None, company_contains=None, product=None, sub_product=None
     if timely is not None:
         w.append(f"{prefix}timely_response = ?"); p.append("Yes" if timely else "No")
     if tag:
-        w.append(f"{prefix}tags ILIKE ?"); p.append(f"%{tag}%")
+        w.append(f"{prefix}tags ILIKE ? ESCAPE '\\'"); p.append(_like(tag))
     if has_narrative is True:
         w.append(f"{prefix}complaint_id IN (SELECT complaint_id FROM n)")
     elif has_narrative is False:
@@ -165,6 +165,11 @@ METRICS = (
     "round(avg(CASE WHEN c.company_response='Closed with non-monetary relief' THEN 1.0 ELSE 0.0 END), 4) AS nonmonetary_relief_rate, "
     "round(avg(CASE WHEN c.company_response='In progress' THEN 1.0 ELSE 0.0 END), 4) AS in_progress_rate"
 )
+
+
+def _like(v: str) -> str:
+    """Escape LIKE wildcards so user text is matched literally."""
+    return "%" + v.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
 
 
 def _page(limit: int, offset: int) -> tuple[int, int]:
@@ -238,9 +243,9 @@ def list_values(field: str, search: Optional[str] = None, product: Optional[str]
         raise ValueError(f"field must be one of {allowed}. For company names use find_company.")
     where, p = ["c." + field + " IS NOT NULL"], []
     if search:
-        where.append(f"c.{field} ILIKE ?"); p.append(f"%{search}%")
+        where.append(f"c.{field} ILIKE ? ESCAPE '\\'"); p.append(_like(search))
     if product:
-        where.append("c.product ILIKE ?"); p.append(product)
+        where.append("lower(c.product) = lower(?)"); p.append(product)
     limit, _ = _page(limit, 0)
     return run(f"SELECT c.{field} AS value, count(*) AS complaints FROM c WHERE {' AND '.join(where)} GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}", p)
 
@@ -276,6 +281,10 @@ def complaint_counts(group_by: Optional[list[str]] = None, company: Optional[str
     gb = group_by or []
     if len(gb) > 2:
         raise ValueError("group_by takes at most two fields")
+    if len(set(gb)) != len(gb):
+        raise ValueError(f"group_by has a repeated field: {gb}")
+    if order_by not in ("complaints", "timely_rate", "monetary_relief_rate"):
+        raise ValueError("order_by must be complaints, timely_rate or monetary_relief_rate")
     for g in gb:
         if g not in GROUPS:
             raise ValueError(f"unknown group_by {g!r}; choose from {list(GROUPS)}")
@@ -290,6 +299,8 @@ def complaint_counts(group_by: Optional[list[str]] = None, company: Optional[str
     rows = run(f"SELECT {sel + ', ' if sel else ''}{METRICS} FROM c WHERE {where}{grp}{order} LIMIT {limit + 1} OFFSET {offset}", p)
     if company and rows and not gb and not rows[0]["complaints"]:
         rows[0]["hint"] = _company_hint(company)
+    elif tag and rows and not gb and not rows[0]["complaints"]:
+        rows[0]["hint"] = "No complaints carry that tag with these filters. CFPB tags are 'Servicemember' and 'Older American' (a complaint can have both)."
     last = _last_date()
     for r in rows:
         for g, fmt in (("year", str(last.year)), ("month", last.strftime("%Y-%m")),
@@ -310,7 +321,17 @@ def trend(period: str = "month", company: Optional[str] = None, company_contains
     if period not in ("month", "quarter", "year"):
         raise ValueError("period must be month, quarter or year")
     where, p = _filters(company, company_contains, product, None, issue, state, date_from, date_to, company_response, None, submitted_via, tag)
-    return run(f"SELECT {GROUPS[period]} AS {period}, {METRICS} FROM c WHERE {where} GROUP BY 1 ORDER BY 1 LIMIT 1000", p)
+    rows = run(f"SELECT {GROUPS[period]} AS {period}, {METRICS} FROM c WHERE {where} GROUP BY 1 ORDER BY 1 LIMIT 1000", p)
+    if not rows:
+        msg = "No complaints match these filters."
+        if company:
+            msg += " " + _company_hint(company)
+        elif company_contains:
+            msg += " Use find_company to see which names exist."
+        elif tag:
+            msg += " CFPB tags are 'Servicemember' and 'Older American'."
+        return [{"message": msg, "complaints": 0}]
+    return rows
 
 
 @mcp.tool(description="Profile of one company (or all name variants via company_contains): totals, first/last complaint, top products, issues, states, "
@@ -365,9 +386,9 @@ def _narr_where(words, phrase, any_of, company, company_contains, product, state
     if company:
         w.append("n.company = ?"); p.append(company)
     if company_contains:
-        w.append("n.company ILIKE ?"); p.append(f"%{company_contains}%")
+        w.append("n.company ILIKE ? ESCAPE '\\'"); p.append(_like(company_contains))
     if product:
-        w.append("n.product ILIKE ?"); p.append(product)
+        w.append("lower(n.product) = lower(?)"); p.append(product)
     if state:
         st = state.upper().strip()
         if st not in STATES:
@@ -390,7 +411,7 @@ def _narr_where(words, phrase, any_of, company, company_contains, product, state
 
 @mcp.tool(description="Keyword search over archived complaint narratives (frozen at " + NARRATIVE_FREEZE + "; CFPB stopped publishing them in September 2026). "
                       "query: words that must all appear (case-insensitive), or use phrase for an exact phrase, or any_of for alternatives. "
-                      "Returns a snippet per complaint plus its structured fields, newest first; use get_complaint for the full text. "
+                      "Returns a snippet per complaint plus its structured fields, newest first (date order, not relevance-ranked: every result contains all your words); use get_complaint for the full text. "
                       "Searches scan text, so narrow with date_from/date_to, company/company_contains, product or state when you can: an unfiltered search over all years can time out. "
                       "Filters: company, company_contains, product, state (2 letters), date_from/date_to (YYYY-MM-DD or YYYY-MM), "
                       "plus issue, sub_product, company_response, timely, tag (these are slower).")
