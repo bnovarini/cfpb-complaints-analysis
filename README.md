@@ -29,7 +29,7 @@ pip install cfpb-complaints-analysis
 cfpb-complaints-mcp
 ```
 
-The first run downloads the Parquet files (about 700 MB) to `~/.cache/cfpb-complaints-analysis`. Add the server to your MCP client as a stdio command, or use the hosted endpoint listed in the MCP registry as `io.github.bnovarini/cfpb-complaints-analysis`.
+The first run downloads the Parquet files (about 700 MB) from the hosted service to `~/.cache/cfpb-complaints-analysis`. Set `CFPB_DATA_URL` to fetch them from somewhere else, or `CFPB_DATA_DIR` to use a folder you built yourself. Add the server to your MCP client as a stdio command, or use the hosted endpoint listed in the MCP registry as `io.github.bnovarini/cfpb-complaints-analysis`.
 
 Tools: `dataset_info`, `list_values`, `find_company`, `complaint_counts`, `trend`, `company_profile`, `compare_companies`, `search_narratives`, `count_narratives`, `get_complaint`.
 
