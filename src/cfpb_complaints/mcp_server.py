@@ -135,6 +135,7 @@ def _filters(company=None, company_contains=None, product=None, sub_product=None
             raise ValueError(f"state must be a two-letter code, got {state!r}")
         w.append(f"{prefix}state = ?"); p.append(s)
     f, t = _d(date_from, "date_from"), _d(date_to, "date_to", end=True)
+    _check_range(f, t)
     if f:
         w.append(f"{prefix}date_received >= CAST(? AS DATE)"); p.append(f)
     if t:
@@ -152,6 +153,7 @@ def _filters(company=None, company_contains=None, product=None, sub_product=None
 
 FILTER_DOC = (
     "Filters: company (exact name as in find_company), company_contains (substring), product, sub_product, issue, "
+    "product: CFPB renamed credit reporting twice, so it appears under three product names (use list_values field=product), "
     "company_response (exact CFPB value, case-insensitive), submitted_via, state (2 letters), tag (e.g. 'Servicemember', 'Older American'), "
     "timely (true/false), date_from/date_to (YYYY-MM-DD or YYYY-MM, on date received)."
 )
@@ -166,7 +168,46 @@ METRICS = (
 
 
 def _page(limit: int, offset: int) -> tuple[int, int]:
-    return max(1, min(int(limit), MAX_ROWS)), max(0, int(offset))
+    if int(limit) < 1:
+        raise ValueError(f"limit must be 1 or more, got {limit}")
+    if int(offset) < 0:
+        raise ValueError(f"offset must be 0 or more, got {offset}")
+    return min(int(limit), MAX_ROWS), int(offset)
+
+
+def _clamp_note(limit: int) -> list[dict]:
+    return [{"limit_clamped": True, "message": f"limit {limit} is above the maximum of {MAX_ROWS}; returned at most {MAX_ROWS} rows. Use offset to page."}] if int(limit) > MAX_ROWS else []
+
+
+def _check_range(f, t):
+    if f and t and f > t:
+        raise ValueError(f"date_from ({f}) is after date_to ({t})")
+
+
+def _check_any_of(any_of):
+    if any_of is not None and not [a for a in any_of if a and a.strip()]:
+        raise ValueError("any_of is empty: pass at least one non-empty term, or leave it out")
+
+
+_LAST: list = []
+
+
+def _last_date():
+    if not _LAST:
+        _LAST.append(run("SELECT max(date_received) AS d FROM c")[0]["d"])
+    v = _LAST[0]
+    return date.fromisoformat(v) if isinstance(v, str) else v
+
+
+def _company_hint(name: str) -> str:
+    toks = [t for t in re.split(r"[^A-Za-z0-9]+", name) if t]
+    sug = []
+    if toks:
+        sug = [r["company"] for r in run("SELECT c.company, count(*) AS n FROM c WHERE " + " AND ".join("c.company ILIKE ?" for _ in toks)
+                                         + " GROUP BY 1 ORDER BY 2 DESC LIMIT 5", [f"%{t}%" for t in toks])]
+    if sug:
+        return f"No company is named exactly {name!r}. Did you mean: {'; '.join(sug)}? (or use company_contains for all variants)"
+    return f"No company is named exactly {name!r} and no similar name was found. Use find_company to search."
 
 
 # ---------------- tools ----------------
@@ -176,8 +217,13 @@ def dataset_info() -> dict:
             "count(DISTINCT company) AS companies, count(DISTINCT product) AS products FROM c")[0]
     nn = run("SELECT count(*) AS narratives, min(complaint_id) AS min_id FROM n")[0]
     r["narratives"] = nn["narratives"]
+    r["narratives_linked_to_complaints"] = run("SELECT count(*) AS n FROM n WHERE complaint_id IN (SELECT complaint_id FROM c)")[0]["n"]
     r["narratives_note"] = (f"Narratives come from CFPB's FOIA Reading Room archive, frozen at {NARRATIVE_FREEZE}: CFPB stopped publishing "
-                            "narratives in September 2026. Complaints published after that have none, and none exist before 2015.")
+                            "narratives in September 2026. Complaints published after that have none, and none exist before 2015. "
+                            "The archive thins out near the end: about 17,000 narratives for each of May and June 2026, about 10,000 for July, and 1 for August 1-14, "
+                            "so 2026 narrative counts are not comparable to earlier months. "
+                            "A few narratives (see narratives minus narratives_linked_to_complaints) belong to complaints CFPB has since removed from its live file; "
+                            "they have no structured fields, so they appear only in unfiltered narrative counts and get_complaint.")
     r["note"] = NOTE
     r["latest_complaint_year_partial"] = True
     return r
@@ -208,8 +254,15 @@ def find_company(name: str, limit: int = 25) -> list[dict]:
     if not toks:
         raise ValueError("name is empty")
     where = " AND ".join("c.company ILIKE ?" for _ in toks)
-    return run(f"SELECT c.company, count(*) AS complaints, min(c.date_received) AS first_received, max(c.date_received) AS last_received "
+    rows = run(f"SELECT c.company, count(*) AS complaints, min(c.date_received) AS first_received, max(c.date_received) AS last_received "
                f"FROM c WHERE {where} GROUP BY 1 ORDER BY 2 DESC LIMIT {limit}", [f"%{t}%" for t in toks])
+    if not rows:
+        words = [t for t in toks if len(t) > 3] or toks
+        alt = run("SELECT c.company, count(*) AS complaints FROM c WHERE " + " OR ".join("c.company ILIKE ?" for _ in words)
+                  + " GROUP BY 1 ORDER BY 2 DESC LIMIT 5", [f"%{t}%" for t in words])
+        return [{"message": f"No company name contains all of {toks}. " + ("Names matching any word: " + "; ".join(a["company"] for a in alt) if alt else "No similar names found."),
+                 "complaints": 0}]
+    return rows
 
 
 @mcp.tool(description="Count complaints, optionally grouped. group_by is one or two of: " + ", ".join(GROUPS) + ". Returns complaints, timely_rate, "
@@ -226,6 +279,7 @@ def complaint_counts(group_by: Optional[list[str]] = None, company: Optional[str
     for g in gb:
         if g not in GROUPS:
             raise ValueError(f"unknown group_by {g!r}; choose from {list(GROUPS)}")
+    requested = limit
     limit, offset = _page(limit, offset)
     where, p = _filters(company, company_contains, product, sub_product, issue, state, date_from, date_to, company_response, timely, submitted_via, tag, has_narrative)
     sel = ", ".join(f"{GROUPS[g]} AS {g}" for g in gb)
@@ -234,10 +288,18 @@ def complaint_counts(group_by: Optional[list[str]] = None, company: Optional[str
     chrono = gb and gb[0] in ("year", "quarter", "month")
     order = f" ORDER BY {'1 ASC' if chrono else ob + ' DESC'}" + (f", {ob} DESC" if chrono and len(gb) > 1 else "")
     rows = run(f"SELECT {sel + ', ' if sel else ''}{METRICS} FROM c WHERE {where}{grp}{order} LIMIT {limit + 1} OFFSET {offset}", p)
+    if company and rows and not gb and not rows[0]["complaints"]:
+        rows[0]["hint"] = _company_hint(company)
+    last = _last_date()
+    for r in rows:
+        for g, fmt in (("year", str(last.year)), ("month", last.strftime("%Y-%m")),
+                       ("quarter", f"{last.year}-Q{(last.month - 1) // 3 + 1}")):
+            if g in r and str(r[g]) == fmt:
+                r["partial_period"] = f"{fmt} runs only through {last.isoformat()}; do not compare it to a full {g}."
     if len(rows) > limit:
         rows = rows[:limit]
         rows.append({"truncated": True, "next_offset": offset + limit, "message": "More groups exist; raise offset or narrow filters."})
-    return rows
+    return rows + _clamp_note(requested)
 
 
 @mcp.tool(description="Complaints over time (month, quarter or year), for one filter set. Set period to month, quarter or year. "
@@ -312,6 +374,7 @@ def _narr_where(words, phrase, any_of, company, company_contains, product, state
             raise ValueError(f"state must be a two-letter code, got {state!r}")
         w.append("n.state = ?"); p.append(st)
     f, t = _d(date_from, "date_from"), _d(date_to, "date_to", end=True)
+    _check_range(f, t)
     if f:
         w.append("n.date_received >= CAST(? AS DATE)"); p.append(f)
     if t:
@@ -337,8 +400,10 @@ def search_narratives(query: Optional[str] = None, phrase: Optional[str] = None,
                       date_from: Optional[str] = None, date_to: Optional[str] = None, company_response: Optional[str] = None,
                       timely: Optional[bool] = None, tag: Optional[str] = None, limit: int = 10, offset: int = 0) -> list[dict]:
     words = [w for w in re.split(r"\s+", (query or "").strip()) if w]
+    _check_any_of(any_of)
     if not (words or phrase or any_of):
-        raise ValueError("pass query, phrase or any_of")
+        raise ValueError("Add a keyword to search: query (all words must appear), phrase (exact text) or any_of (alternatives). "
+                         "To count or filter complaints that have a narrative without a keyword, use complaint_counts with has_narrative=true.")
     limit, offset = _page(limit, offset)
     limit = min(limit, 25)
     nw, np_ = _narr_where(words, phrase, any_of, company, company_contains, product, state, date_from, date_to)
@@ -379,6 +444,7 @@ def count_narratives(query: Optional[str] = None, phrase: Optional[str] = None, 
     if group_by and group_by not in cols:
         raise ValueError("group_by must be year, month, product, company or state")
     words = [w for w in re.split(r"\s+", (query or "").strip()) if w]
+    _check_any_of(any_of)
     nw, np_ = _narr_where(words, phrase, any_of, company, company_contains, product, state, date_from, date_to)
     limit, _ = _page(limit, 0)
     sel = f"{cols[group_by]} AS {group_by}, " if group_by else ""
