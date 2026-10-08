@@ -1,6 +1,6 @@
 [project]
 name = "cfpb-complaints-analysis"
-version = "0.1.0"
+version = "0.1.1"
 description = "CFPB Consumer Complaint Database as clean Parquet plus an MCP server: 18M complaints and 3.85M archived narratives"
 readme = "README.md"
 license = {text = "MIT"}
