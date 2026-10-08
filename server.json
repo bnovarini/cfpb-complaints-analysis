@@ -3,7 +3,7 @@
   "name": "io.github.bnovarini/cfpb-complaints-analysis",
   "title": "CFPB consumer complaints",
   "description": "CFPB consumer complaints: 18M records, 3.85M archived narratives. Search, counts, trends.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "repository": {
     "url": "https://github.com/bnovarini/cfpb-complaints-analysis",
     "source": "github"
